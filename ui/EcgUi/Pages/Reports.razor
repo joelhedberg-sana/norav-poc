@@ -1,0 +1,25 @@
+@page "/reports"
+@inject HttpClient Http
+
+<h3>ECG Reports</h3>
+
+<select @onchange="OnPick">
+  <option value="">-- choose --</option>
+  @foreach (var f in files) { <option value="@f">@f</option> }
+</select>
+
+@if (!string.IsNullOrEmpty(selected))
+{
+  <iframe src="@($"/api/reports/{selected}")" style="width:100%;height:75vh;"></iframe>
+}
+
+@code {
+  List<string> files = new();
+  string selected = "";
+
+  protected override async Task OnInitializedAsync()
+  {
+    files = (await Http.GetFromJsonAsync<List<string>>("/api/reports")) ?? new();
+  }
+  async Task OnPick(ChangeEventArgs e) => selected = e.Value?.ToString() ?? "";
+}
