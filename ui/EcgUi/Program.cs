@@ -1,13 +1,16 @@
 using Azure.Storage.Blobs;
+using Microsoft.AspNetCore.Components;
+using Microsoft.AspNetCore.Components.Web;
 
 var builder = WebApplication.CreateBuilder(args);
 
-builder.Services.AddRazorPages();
-builder.Services.AddServerSideBlazor();
-// add HttpClient for server-side Blazor components
+// Add Blazor Server services
+builder.Services.AddRazorComponents()
+    .AddInteractiveServerComponents();
+
+// HttpClient for server
 builder.Services.AddHttpClient();
 
-// optional Azurite client (if you later want to stream from blob)
 if ((builder.Configuration["Storage:Mode"] ?? "Local") == "Azurite")
 {
     builder.Services.AddSingleton(sp =>
@@ -21,11 +24,13 @@ var app = builder.Build();
 if (!app.Environment.IsDevelopment()) app.UseExceptionHandler("/Error");
 app.UseStaticFiles();
 app.UseRouting();
+app.UseAntiforgery();
 
-app.MapBlazorHub();
-app.MapFallbackToPage("/_Host");
+// Map root component (App.razor contains full HTML)
+app.MapRazorComponents<EcgUi.Components.App>()
+   .AddInteractiveServerRenderMode();
 
-// endpoints for pure-local folder viewing
+// Minimal API endpoints for PDF listing
 var ingestDir = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";
 Directory.CreateDirectory(ingestDir);
 app.MapGet("/api/reports", () =>
