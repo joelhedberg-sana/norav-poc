@@ -40,11 +40,23 @@ var worklistIniPath = cfg["WorklistIniPath"]!;
 app.MapPost("/demographics", async (Demographics d) =>
 {
     var sb = new StringBuilder()
-        .AppendLine("[Patient]")
-        .AppendLine($"PatientID={d.PatientId}")
-        .AppendLine($"PatientName={d.PatientName}");
-    if (!string.IsNullOrWhiteSpace(d.AccessionNumber))
-        sb.AppendLine($"AccessionNumber={d.AccessionNumber}");
+        .AppendLine("[PatientData001]")
+        .AppendLine($"ID={d.PatientId}")
+        .AppendLine($"LastName={d.LastName}")
+        .AppendLine($"FirstName={d.FirstName}")
+        .AppendLine($"BirthDay={d.BirthDay}")
+        .AppendLine($"BirthMonth={d.BirthMonth}")
+        .AppendLine($"BirthYear={d.BirthYear}")
+        .AppendLine($"Sex={d.Sex}")
+        .AppendLine($"Weight={d.Weight}")
+        .AppendLine($"Height={d.Height}")
+        .AppendLine($"Address={d.Address}")
+        .AppendLine($"Phone1={d.Phone1}")
+        .AppendLine($"Phone2={d.Phone2}")
+        .AppendLine($"Fax={d.Fax}")
+        .AppendLine($"E-Mail={d.Email}")
+        .AppendLine($"Medications={d.Medications}")
+        .AppendLine($"Other={d.Other}");
 
     Directory.CreateDirectory(Path.GetDirectoryName(worklistIniPath)!);
     await File.WriteAllTextAsync(worklistIniPath, sb.ToString(), Encoding.UTF8);
@@ -54,7 +66,23 @@ app.MapPost("/demographics", async (Demographics d) =>
 app.Run();
 
 // --- Models ---
-record Demographics(string PatientId, string PatientName, string? AccessionNumber);
+record Demographics(
+    string PatientId,
+    string LastName,
+    string FirstName,
+    int BirthDay,
+    int BirthMonth,
+    int BirthYear,
+    int Sex,
+    int Weight,
+    int Height,
+    string Address,
+    string Phone1,
+    string Phone2,
+    string Fax,
+    string Email,
+    string Medications,
+    string Other);
 
 // --- Background watcher ---
 public class WatcherService : BackgroundService

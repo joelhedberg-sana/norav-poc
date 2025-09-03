@@ -4,11 +4,10 @@ using Microsoft.AspNetCore.Components.Web;
 
 var builder = WebApplication.CreateBuilder(args);
 
-// Add Blazor Server services
-builder.Services.AddRazorComponents()
-    .AddInteractiveServerComponents();
+// Blazor Server services
+builder.Services.AddRazorPages();
+builder.Services.AddServerSideBlazor();
 
-// HttpClient for server
 builder.Services.AddHttpClient();
 
 if ((builder.Configuration["Storage:Mode"] ?? "Local") == "Azurite")
@@ -24,11 +23,9 @@ var app = builder.Build();
 if (!app.Environment.IsDevelopment()) app.UseExceptionHandler("/Error");
 app.UseStaticFiles();
 app.UseRouting();
-app.UseAntiforgery();
 
-// Map root component (App.razor contains full HTML)
-app.MapRazorComponents<EcgUi.Components.App>()
-   .AddInteractiveServerRenderMode();
+app.MapBlazorHub();
+app.MapFallbackToPage("/_Host");
 
 // Minimal API endpoints for PDF listing
 var ingestDir = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";

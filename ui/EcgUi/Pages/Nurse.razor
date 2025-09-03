@@ -4,12 +4,25 @@
 
 <h3>ECG Demographics → Worklist (INI)</h3>
 
-<EditForm Model="@m" OnValidSubmit="Submit">
+<EditForm Model="@m" OnValidSubmit="Submit" formname="demoForm">
   <DataAnnotationsValidator />
   <ValidationSummary />
-  <InputText @bind-Value="m.PatientId" placeholder="Patient ID" />
-  <InputText @bind-Value="m.PatientName" placeholder="Patient Name" />
-  <InputText @bind-Value="m.AccessionNumber" placeholder="Accession" />
+  <InputText @bind-Value="m.PatientId" placeholder="ID" />
+  <InputText @bind-Value="m.LastName" placeholder="Last Name" />
+  <InputText @bind-Value="m.FirstName" placeholder="First Name" />
+  <InputText @bind-Value="m.BirthDay" placeholder="Birth Day" />
+  <InputText @bind-Value="m.BirthMonth" placeholder="Birth Month" />
+  <InputText @bind-Value="m.BirthYear" placeholder="Birth Year" />
+  <InputText @bind-Value="m.Sex" placeholder="Sex (1=Male,2=Female)" />
+  <InputText @bind-Value="m.Weight" placeholder="Weight" />
+  <InputText @bind-Value="m.Height" placeholder="Height" />
+  <InputText @bind-Value="m.Address" placeholder="Address" />
+  <InputText @bind-Value="m.Phone1" placeholder="Phone1" />
+  <InputText @bind-Value="m.Phone2" placeholder="Phone2" />
+  <InputText @bind-Value="m.Fax" placeholder="Fax" />
+  <InputText @bind-Value="m.Email" placeholder="E-Mail" />
+  <InputText @bind-Value="m.Medications" placeholder="Medications" />
+  <InputText @bind-Value="m.Other" placeholder="Other" />
   <button type="submit">Write Worklist</button>
 </EditForm>
 
@@ -18,18 +31,30 @@
 @code {
   Demographics m = new();
   string status = "";
-
   public class Demographics
   {
-    public string PatientId { get; set; } = string.Empty;
-    public string PatientName { get; set; } = string.Empty;
-    public string? AccessionNumber { get; set; }
+    public string PatientId { get; set; } = "";
+    public string LastName { get; set; } = "";
+    public string FirstName { get; set; } = "";
+    public int BirthDay { get; set; }
+    public int BirthMonth { get; set; }
+    public int BirthYear { get; set; }
+    public int Sex { get; set; } = 1;
+    public int Weight { get; set; }
+    public int Height { get; set; }
+    public string Address { get; set; } = "";
+    public string Phone1 { get; set; } = "";
+    public string Phone2 { get; set; } = "";
+    public string Fax { get; set; } = "";
+    public string Email { get; set; } = "";
+    public string Medications { get; set; } = "";
+    public string Other { get; set; } = "";
   }
 
   private async Task Submit()
   {
     var agent = Cfg["AgentUrl"]!;
     var resp = await Http.PostAsJsonAsync($"{agent}/demographics", m);
-    status = resp.IsSuccessStatusCode ? "INI written. Open ECG app → Worklist." : "Failed.";
+    status = resp.IsSuccessStatusCode ? "INI written." : "Failed.";
   }
 }
