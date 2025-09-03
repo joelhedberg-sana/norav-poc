@@ -1,6 +1,7 @@
 using Azure.Storage.Blobs;
 using Microsoft.AspNetCore.Components;
 using Microsoft.AspNetCore.Components.Web;
+using Azure.Storage.Blobs.Models;
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -8,7 +9,12 @@ var builder = WebApplication.CreateBuilder(args);
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
 
-builder.Services.AddHttpClient();
+// HttpClient with BaseAddress from NavigationManager
+builder.Services.AddScoped(sp =>
+{
+    var nav = sp.GetRequiredService<NavigationManager>();
+    return new HttpClient { BaseAddress = new Uri(nav.BaseUri) };
+});
 
 if ((builder.Configuration["Storage:Mode"] ?? "Local") == "Azurite")
 {
@@ -27,20 +33,48 @@ app.UseRouting();
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 
-// Minimal API endpoints for PDF listing
-var ingestDir = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";
-Directory.CreateDirectory(ingestDir);
-app.MapGet("/api/reports", () =>
+var storageMode = builder.Configuration["Storage:Mode"] ?? "Local";
+if (storageMode == "Azurite")
 {
-    var files = Directory.GetFiles(ingestDir, "*.pdf");
-    return files.Select(Path.GetFileName).OrderByDescending(x => x);
-});
-app.MapGet("/api/reports/{name}", (string name) =>
+    // Blob listing endpoint
+    app.MapGet("/api/reports", async (BlobContainerClient container) =>
+    {
+        await container.CreateIfNotExistsAsync();
+        var names = new List<string>();
+        await foreach (BlobItem b in container.GetBlobsAsync(prefix: null))
+        {
+            if (b.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                names.Add(b.Name);
+        }
+        return names.OrderByDescending(n => n);
+    });
+
+    // Blob download endpoint
+    app.MapGet("/api/reports/{name}", async (string name, BlobContainerClient container) =>
+    {
+        var client = container.GetBlobClient(name);
+        if (!await client.ExistsAsync()) return Results.NotFound();
+        var dl = await client.DownloadStreamingAsync();
+        return Results.Stream(dl.Value.Content, contentType: "application/pdf", fileDownloadName: name, enableRangeProcessing: true);
+    });
+}
+else
 {
-    var path = Path.Combine(ingestDir, name);
-    return File.Exists(path)
-        ? Results.File(path, "application/pdf", enableRangeProcessing: true)
-        : Results.NotFound();
-});
+    // Local file system endpoints (existing behavior)
+    var ingestDir = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";
+    Directory.CreateDirectory(ingestDir);
+    app.MapGet("/api/reports", () =>
+    {
+        var files = Directory.GetFiles(ingestDir, "*.pdf");
+        return files.Select(Path.GetFileName).OrderByDescending(x => x);
+    });
+    app.MapGet("/api/reports/{name}", (string name) =>
+    {
+        var path = Path.Combine(ingestDir, name);
+        return File.Exists(path)
+            ? Results.File(path, "application/pdf", enableRangeProcessing: true)
+            : Results.NotFound();
+    });
+}
 
 app.Run();
