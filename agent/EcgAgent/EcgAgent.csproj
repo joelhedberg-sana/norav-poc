@@ -1,4 +1,4 @@
-<Project Sdk="Microsoft.NET.Sdk.Worker">
+<Project Sdk="Microsoft.NET.Sdk.Web">
 
   <PropertyGroup>
     <TargetFramework>net9.0</TargetFramework>
@@ -9,6 +9,7 @@
 
   <ItemGroup>
     <PackageReference Include="Azure.Storage.Blobs" Version="12.25.0" />
-    <PackageReference Include="Microsoft.Extensions.Hosting" Version="9.0.4" />
+    <!-- Hosting comes from Microsoft.AspNetCore.App with Web SDK; keep WindowsServices for service integration -->
+    <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.8" />
   </ItemGroup>
 </Project>

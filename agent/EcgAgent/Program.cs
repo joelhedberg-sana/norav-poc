@@ -2,15 +2,16 @@ using System.Text;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Hosting;
 
-var builder = Host.CreateApplicationBuilder(args);
+var builder = WebApplication.CreateBuilder(args);
 
-// config & DI
+// --- Configuration ---
 var cfg = builder.Configuration;
-builder.Services.AddWindowsService(); // allows Windows Service hosting later
+
+// --- Services (DI) ---
 builder.Services.AddHostedService<WatcherService>();
 builder.Services.AddSingleton<IConfiguration>(cfg);
 
-// If Storage:Mode == Azurite, register Blob client
+// Register Blob client only if using Azurite
 if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
 {
     builder.Services.AddSingleton(sp =>
@@ -19,10 +20,22 @@ if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
             cfg["Storage:AzuriteContainer"]));
 }
 
+// Add Windows Service integration only when running on Windows
+// and ONLY if you've installed the WindowsServices package.
+if (OperatingSystem.IsWindows())
+{
+    // Requires: dotnet add package Microsoft.Extensions.Hosting.WindowsServices
+    builder.Services.AddWindowsService();
+}
+
+// Optionally bind to a specific URL/port from config
+var url = cfg["Http:Url"] ?? "http://localhost:5000";
+builder.WebHost.UseUrls(url);
+
 var app = builder.Build();
 
 // --- Minimal API: POST /demographics -> write PatientFile.ini ---
-// NOTE: Replace keys after you capture a sample INI from the ECG app.
+// NOTE: Replace the INI keys with the vendor-confirmed schema once you have a sample.
 var worklistIniPath = cfg["WorklistIniPath"]!;
 app.MapPost("/demographics", async (Demographics d) =>
 {
@@ -38,16 +51,12 @@ app.MapPost("/demographics", async (Demographics d) =>
     return Results.Ok(new { wrote = worklistIniPath });
 });
 
-var url = cfg["Http:Url"] ?? "http://localhost:5000";
-app.Urls.Clear();
-app.Urls.Add(url);
+app.Run();
 
-await app.RunAsync();
-
-// --- models ---
+// --- Models ---
 record Demographics(string PatientId, string PatientName, string? AccessionNumber);
 
-// --- background watcher ---
+// --- Background watcher ---
 public class WatcherService : BackgroundService
 {
     private readonly IConfiguration _cfg;
@@ -76,7 +85,7 @@ public class WatcherService : BackgroundService
         {
             try
             {
-                // wait for ECG app to finish writing PDF
+                // Allow the ECG app to finish writing the file
                 await Task.Delay(2000, stoppingToken);
 
                 if ((_cfg["Storage:Mode"] ?? "Local") == "Azurite")
@@ -96,7 +105,7 @@ public class WatcherService : BackgroundService
             }
             catch
             {
-                // TODO: add logging for production
+                // TODO: add logging
             }
         };
 
