@@ -1,21 +1,22 @@
 @page "/nurse"
+@using Microsoft.AspNetCore.Components.Forms
 @inject HttpClient Http
 @inject IConfiguration Cfg
 
 <h3>ECG Demographics → Worklist (INI)</h3>
 
-<EditForm Model="@m" OnValidSubmit="Submit" formname="demoForm">
+<EditForm Model="@m" OnValidSubmit="Submit" FormName="demoForm">
   <DataAnnotationsValidator />
   <ValidationSummary />
   <InputText @bind-Value="m.PatientId" placeholder="ID" />
   <InputText @bind-Value="m.LastName" placeholder="Last Name" />
   <InputText @bind-Value="m.FirstName" placeholder="First Name" />
-  <InputText @bind-Value="m.BirthDay" placeholder="Birth Day" />
-  <InputText @bind-Value="m.BirthMonth" placeholder="Birth Month" />
-  <InputText @bind-Value="m.BirthYear" placeholder="Birth Year" />
-  <InputText @bind-Value="m.Sex" placeholder="Sex (1=Male,2=Female)" />
-  <InputText @bind-Value="m.Weight" placeholder="Weight" />
-  <InputText @bind-Value="m.Height" placeholder="Height" />
+  <InputNumber @bind-Value="m.BirthDay" placeholder="Birth Day" />
+  <InputNumber @bind-Value="m.BirthMonth" placeholder="Birth Month" />
+  <InputNumber @bind-Value="m.BirthYear" placeholder="Birth Year" />
+  <InputNumber @bind-Value="m.Sex" placeholder="Sex (1=Male,2=Female)" />
+  <InputNumber @bind-Value="m.Weight" placeholder="Weight" />
+  <InputNumber @bind-Value="m.Height" placeholder="Height" />
   <InputText @bind-Value="m.Address" placeholder="Address" />
   <InputText @bind-Value="m.Phone1" placeholder="Phone1" />
   <InputText @bind-Value="m.Phone2" placeholder="Phone2" />
@@ -29,7 +30,7 @@
 <p>@status</p>
 
 @code {
-  Demographics m = new();
+  Demographics m = new() { BirthDay = 1, BirthMonth = 1, BirthYear = 1970 }; // defaults
   string status = "";
   public class Demographics
   {

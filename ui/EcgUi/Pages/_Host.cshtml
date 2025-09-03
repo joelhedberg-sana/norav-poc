@@ -1,0 +1,19 @@
+@page "/"
+@namespace EcgUi.Pages
+@addTagHelper *, Microsoft.AspNetCore.Mvc.TagHelpers
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="utf-8" />
+    <title>ECG UI</title>
+    <base href="~/" />
+    <link href="css/bootstrap/bootstrap.min.css" rel="stylesheet" />
+    <link href="app.css" rel="stylesheet" />
+</head>
+<body>
+    <app>
+        <component type="typeof(EcgUi.Components.App)" render-mode="ServerPrerendered" />
+    </app>
+    <script src="_framework/blazor.server.js"></script>
+</body>
+</html>
