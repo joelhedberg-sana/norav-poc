@@ -1,11 +1,12 @@
 @page "/nurse"
-@using System.Net.Http.Json
 @inject HttpClient Http
 @inject IConfiguration Cfg
 
 <h3>ECG Demographics → Worklist (INI)</h3>
 
 <EditForm Model="@m" OnValidSubmit="Submit">
+  <DataAnnotationsValidator />
+  <ValidationSummary />
   <InputText @bind-Value="m.PatientId" placeholder="Patient ID" />
   <InputText @bind-Value="m.PatientName" placeholder="Patient Name" />
   <InputText @bind-Value="m.AccessionNumber" placeholder="Accession" />
@@ -15,11 +16,17 @@
 <p>@status</p>
 
 @code {
-  Demographics m = new("", "", "");
+  Demographics m = new();
   string status = "";
-  record Demographics(string PatientId, string PatientName, string? AccessionNumber);
 
-  async Task Submit()
+  public class Demographics
+  {
+    public string PatientId { get; set; } = string.Empty;
+    public string PatientName { get; set; } = string.Empty;
+    public string? AccessionNumber { get; set; }
+  }
+
+  private async Task Submit()
   {
     var agent = Cfg["AgentUrl"]!;
     var resp = await Http.PostAsJsonAsync($"{agent}/demographics", m);

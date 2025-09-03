@@ -1,13 +1,17 @@
+using Azure.Storage.Blobs;
+
 var builder = WebApplication.CreateBuilder(args);
 
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
+// add HttpClient for server-side Blazor components
+builder.Services.AddHttpClient();
 
 // optional Azurite client (if you later want to stream from blob)
 if ((builder.Configuration["Storage:Mode"] ?? "Local") == "Azurite")
 {
     builder.Services.AddSingleton(sp =>
-        new Azure.Storage.Blobs.BlobContainerClient(
+        new BlobContainerClient(
             builder.Configuration["Storage:AzuriteConnectionString"],
             builder.Configuration["Storage:AzuriteContainer"]));
 }
