@@ -37,6 +37,7 @@ public static class WorklistStore
             { DicomTag.AccessionNumber, accession ?? string.Empty },
             { DicomTag.Modality, "ECG" }, // not standardized modality token, but acceptable for MWL
             { DicomTag.ScheduledProcedureStepSequence, new DicomSequence(
+                DicomTag.ScheduledProcedureStepSequence, // FIX: supply tag for sequence ctor
                 new DicomDataset {
                     { DicomTag.ScheduledStationAETitle, "NEKO_ECG" },
                     { DicomTag.ScheduledProcedureStepStartDate, now.ToString("yyyyMMdd") },
