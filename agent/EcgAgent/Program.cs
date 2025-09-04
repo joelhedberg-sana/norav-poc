@@ -2,6 +2,7 @@ using System.Text;
 using Azure.Storage.Blobs;
 using Microsoft.Extensions.Hosting;
 using System.Collections.Concurrent; // added
+using FellowOakDicom.Network; // DICOM server
 
 var builder = WebApplication.CreateBuilder(args);
 
@@ -15,6 +16,11 @@ builder.Logging.AddSimpleConsole(o =>
 
 // --- Configuration ---
 var cfg = builder.Configuration;
+
+// DICOM server settings & create server (fo-dicom v5)
+var dicomPort = builder.Configuration.GetValue<int>("Dicom:Port", 11112);
+var aet = builder.Configuration.GetValue<string>("Dicom:AET", "NEKO_ECG");
+var server = DicomServerFactory.Create<EcgDicomService>(dicomPort);
 
 // --- Services (DI) ---
 builder.Services.AddHostedService<WatcherService>();
@@ -41,7 +47,7 @@ builder.WebHost.UseUrls(url);
 
 var app = builder.Build();
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
-startupLogger.LogInformation("Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini}", url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"]);
+startupLogger.LogInformation("Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini} | DICOM AET={AET} Port={Port}", url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"], aet, dicomPort);
 
 // --- Minimal API: POST /demographics -> write PatientFile.ini ---
 // NOTE: Replace the INI keys with the vendor-confirmed schema once you have a sample.
@@ -83,6 +89,16 @@ app.MapPost("/demographics", async (Demographics d, ILoggerFactory lf) =>
     }
 });
 
+// --- MWL: add worklist item ---
+app.MapPost("/mwl/items", (Demographics d) =>
+{
+    // Use provided PatientName if supplied; otherwise construct from Last^First per DICOM PN format
+    var patientName = d.PatientName ?? $"{d.LastName}^{d.FirstName}";
+    var ds = WorklistStore.FromOrder(d.PatientId, patientName, d.AccessionNumber);
+    WorklistStore.Add(ds);
+    return Results.Ok(new { added = d.PatientId, ae = aet, port = dicomPort });
+});
+
 app.Run();
 
 // --- Models ---
@@ -102,7 +118,9 @@ record Demographics(
     string Fax,
     string Email,
     string Medications,
-    string Other);
+    string Other,
+    string? PatientName = null,
+    string? AccessionNumber = null);
 
 // --- Background watcher ---
 public class WatcherService : BackgroundService
