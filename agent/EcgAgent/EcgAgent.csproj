@@ -9,7 +9,9 @@
 
   <ItemGroup>
     <PackageReference Include="Azure.Storage.Blobs" Version="12.25.0" />
+    <PackageReference Include="fo-dicom" Version="5.2.2" />
     <!-- Hosting comes from Microsoft.AspNetCore.App with Web SDK; keep WindowsServices for service integration -->
     <PackageReference Include="Microsoft.Extensions.Hosting.WindowsServices" Version="9.0.8" />
+    <PackageReference Include="Microsoft.Extensions.Logging" Version="9.0.8" />
   </ItemGroup>
 </Project>

@@ -25,6 +25,7 @@
   <InputText @bind-Value="m.Medications" placeholder="Medications" />
   <InputText @bind-Value="m.Other" placeholder="Other" />
   <button type="submit">Write Worklist</button>
+  <button type="button" @onclick="SendToMwl">Send to MWL</button>
 </EditForm>
 
 <p>@status</p>
@@ -57,5 +58,12 @@
     var agent = Cfg["AgentUrl"]!;
     var resp = await Http.PostAsJsonAsync($"{agent}/demographics", m);
     status = resp.IsSuccessStatusCode ? "INI written." : "Failed.";
+  }
+
+  private async Task SendToMwl()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsJsonAsync($"{agent}/mwl/items", m);
+    status = resp.IsSuccessStatusCode ? "MWL item added." : "MWL add failed.";
   }
 }
