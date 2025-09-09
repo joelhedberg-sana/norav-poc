@@ -4,6 +4,10 @@ using Microsoft.Extensions.Hosting;
 using System.Collections.Concurrent; // added
 using FellowOakDicom.Network; // DICOM server
 
+builder.Services.AddSingleton<Norav1200HrService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Norav1200HrService>());
+
+var app = builder.Build();
 var builder = WebApplication.CreateBuilder(args);
 
 // Enable console logging detail (optional tweak)
@@ -98,6 +102,16 @@ app.MapPost("/mwl/items", (Demographics d) =>
     WorklistStore.Add(ds);
     return Results.Ok(new { added = d.PatientId, ae = aet, port = dicomPort });
 });
+
+app.Run();
+
+// SDK wrapper endpoints
+app.MapPost("/sdk/open", (Norav1200HrService svc) => Results.Ok(svc.Open()));
+app.MapPost("/sdk/init", (Norav1200HrService svc, int sampleRate) => Results.Ok(svc.Init(sampleRate)));
+app.MapPost("/sdk/start", (Norav1200HrService svc) => Results.Ok(svc.StartStreaming()));
+app.MapPost("/sdk/stop", async (Norav1200HrService svc) => { await svc.StopStreaming(); return Results.Ok(new { stopped = true }); });
+app.MapGet("/sdk/status", () => Results.Ok(new { os = Environment.OSVersion.ToString(), arch = RuntimeInformation.OSArchitecture.ToString() }));
+app.MapGet("/sdk/samples", (Norav1200HrService svc, int n) => Results.Ok(svc.GetSamples(Math.Clamp(n, 100, 2000))));
 
 app.Run();
 

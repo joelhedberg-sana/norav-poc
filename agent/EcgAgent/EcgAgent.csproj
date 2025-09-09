@@ -7,6 +7,15 @@
     <UserSecretsId>dotnet-EcgAgent-64edfb93-318b-4b30-b23a-0172868389f3</UserSecretsId>
   </PropertyGroup>
 
+<PropertyGroup>
+  <TargetFramework>net9.0</TargetFramework>
+  <RuntimeIdentifier>win-x64</RuntimeIdentifier>
+</PropertyGroup>
+
+<ItemGroup>
+  <None Include="runtimes\win-x64\native\NVECGUSB.dll" CopyToOutputDirectory="PreserveNewest" />
+</ItemGroup>
+
   <ItemGroup>
     <PackageReference Include="Azure.Storage.Blobs" Version="12.25.0" />
     <PackageReference Include="fo-dicom" Version="5.2.2" />
