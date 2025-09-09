@@ -121,17 +121,17 @@ public sealed class Norav1200HrService : IHostedService, IDisposable
     private void AllocBuffers()
     {
         FreeBuffers();
-        var bytes = _bufSamples * sizeof(short);
+        int bytes = _bufSamples * sizeof(short);
+        var zero = new byte[bytes]; // reused zero array
         for (int i = 0; i < LeadCount; i++)
         {
             _ecg[i] = Marshal.AllocHGlobal(bytes);
             _ecgOrig[i] = Marshal.AllocHGlobal(bytes);
-            Span<byte> zero = stackalloc byte[1];
-            // initialize to 0
-            unsafe { Buffer.MemoryCopy((void*)_ecg[i], (void*)_ecg[i], bytes, 0); }
+            Marshal.Copy(zero, 0, _ecg[i], bytes);
+            Marshal.Copy(zero, 0, _ecgOrig[i], bytes);
         }
-        // optional flags per sample
         _info = Marshal.AllocHGlobal(_bufSamples * sizeof(int));
+        Marshal.Copy(new byte[_bufSamples * sizeof(int)], 0, _info, _bufSamples * sizeof(int));
     }
 
     private void FreeBuffers()

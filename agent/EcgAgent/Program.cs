@@ -1,16 +1,12 @@
 using System.Text;
+using System.Runtime.InteropServices;
 using Azure.Storage.Blobs;
-using Microsoft.Extensions.Hosting;
-using System.Collections.Concurrent; // added
-using FellowOakDicom.Network; // DICOM server
+using System.Collections.Concurrent;
+using FellowOakDicom.Network;
 
-builder.Services.AddSingleton<Norav1200HrService>();
-builder.Services.AddHostedService(sp => sp.GetRequiredService<Norav1200HrService>());
-
-var app = builder.Build();
 var builder = WebApplication.CreateBuilder(args);
 
-// Enable console logging detail (optional tweak)
+// Logging
 builder.Logging.ClearProviders();
 builder.Logging.AddSimpleConsole(o =>
 {
@@ -18,19 +14,21 @@ builder.Logging.AddSimpleConsole(o =>
     o.TimestampFormat = "HH:mm:ss.fff ";
 });
 
-// --- Configuration ---
+// Configuration
 var cfg = builder.Configuration;
 
-// DICOM server settings & create server (fo-dicom v5)
-var dicomPort = builder.Configuration.GetValue<int>("Dicom:Port", 11112);
-var aet = builder.Configuration.GetValue<string>("Dicom:AET", "NEKO_ECG");
+// DICOM
+var dicomPort = cfg.GetValue<int>("Dicom:Port", 11112);
+var aet = cfg.GetValue<string>("Dicom:AET", "NEKO_ECG");
 var server = DicomServerFactory.Create<EcgDicomService>(dicomPort);
 
-// --- Services (DI) ---
-builder.Services.AddHostedService<WatcherService>();
+// Services
 builder.Services.AddSingleton<IConfiguration>(cfg);
+builder.Services.AddHostedService<WatcherService>();
+builder.Services.AddSingleton<Norav1200HrService>();
+builder.Services.AddHostedService(sp => sp.GetRequiredService<Norav1200HrService>());
 
-// Register Blob client only if using Azurite
+// Blob (Azurite)
 if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
 {
     builder.Services.AddSingleton(sp =>
@@ -39,27 +37,30 @@ if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
             cfg["Storage:AzuriteContainer"]));
 }
 
-// Add Windows Service integration only when running on Windows
+// Windows service integration (only on Windows)
 if (OperatingSystem.IsWindows())
 {
     builder.Services.AddWindowsService();
 }
 
-// Optionally bind to a specific URL/port from config
+// URL binding
 var url = cfg["Http:Url"] ?? "http://localhost:5000";
 builder.WebHost.UseUrls(url);
 
 var app = builder.Build();
-var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
-startupLogger.LogInformation("Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini} | DICOM AET={AET} Port={Port}", url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"], aet, dicomPort);
 
-// --- Minimal API: POST /demographics -> write PatientFile.ini ---
-// NOTE: Replace the INI keys with the vendor-confirmed schema once you have a sample.
+var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
+startupLogger.LogInformation(
+    "Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini} | DICOM AET={AET} Port={Port}",
+    url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"], aet, dicomPort);
+
+// Demographics -> INI
 var worklistIniPath = cfg["WorklistIniPath"]!;
 app.MapPost("/demographics", async (Demographics d, ILoggerFactory lf) =>
 {
     var log = lf.CreateLogger("Demographics");
-    log.LogInformation("Received demographics PatientId={PatientId} LastName={LastName} FirstName={FirstName}", d.PatientId, d.LastName, d.FirstName);
+    log.LogInformation("Received demographics PatientId={PatientId} LastName={LastName} FirstName={FirstName}",
+        d.PatientId, d.LastName, d.FirstName);
     try
     {
         var sb = new StringBuilder()
@@ -93,29 +94,32 @@ app.MapPost("/demographics", async (Demographics d, ILoggerFactory lf) =>
     }
 });
 
-// --- MWL: add worklist item ---
+// MWL add
 app.MapPost("/mwl/items", (Demographics d) =>
 {
-    // Use provided PatientName if supplied; otherwise construct from Last^First per DICOM PN format
     var patientName = d.PatientName ?? $"{d.LastName}^{d.FirstName}";
     var ds = WorklistStore.FromOrder(d.PatientId, patientName, d.AccessionNumber);
     WorklistStore.Add(ds);
     return Results.Ok(new { added = d.PatientId, ae = aet, port = dicomPort });
 });
 
-app.Run();
-
-// SDK wrapper endpoints
+// SDK endpoints
 app.MapPost("/sdk/open", (Norav1200HrService svc) => Results.Ok(svc.Open()));
 app.MapPost("/sdk/init", (Norav1200HrService svc, int sampleRate) => Results.Ok(svc.Init(sampleRate)));
 app.MapPost("/sdk/start", (Norav1200HrService svc) => Results.Ok(svc.StartStreaming()));
-app.MapPost("/sdk/stop", async (Norav1200HrService svc) => { await svc.StopStreaming(); return Results.Ok(new { stopped = true }); });
-app.MapGet("/sdk/status", () => Results.Ok(new { os = Environment.OSVersion.ToString(), arch = RuntimeInformation.OSArchitecture.ToString() }));
-app.MapGet("/sdk/samples", (Norav1200HrService svc, int n) => Results.Ok(svc.GetSamples(Math.Clamp(n, 100, 2000))));
+app.MapPost("/sdk/stop", async (Norav1200HrService svc) =>
+{
+    await svc.StopStreaming();
+    return Results.Ok(new { stopped = true });
+});
+app.MapGet("/sdk/status", () =>
+    Results.Ok(new { os = Environment.OSVersion.ToString(), arch = RuntimeInformation.OSArchitecture.ToString() }));
+app.MapGet("/sdk/samples", (Norav1200HrService svc, int n) =>
+    Results.Ok(svc.GetSamples(Math.Clamp(n, 100, 2000))));
 
 app.Run();
 
-// --- Models ---
+// Models
 record Demographics(
     string PatientId,
     string LastName,
@@ -136,7 +140,6 @@ record Demographics(
     string? PatientName = null,
     string? AccessionNumber = null);
 
-// --- Background watcher ---
 public class WatcherService : BackgroundService
 {
     private readonly IConfiguration _cfg;
