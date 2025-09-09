@@ -37,6 +37,15 @@ if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
             cfg["Storage:AzuriteContainer"]));
 }
 
+// CORS
+builder.Services.AddCors(o =>
+{
+    o.AddPolicy("ui", p => p
+        .WithOrigins("http://localhost:5200")
+        .AllowAnyHeader()
+        .AllowAnyMethod());
+});
+
 // Windows service integration (only on Windows)
 if (OperatingSystem.IsWindows())
 {
@@ -48,6 +57,9 @@ var url = cfg["Http:Url"] ?? "http://localhost:5000";
 builder.WebHost.UseUrls(url);
 
 var app = builder.Build();
+
+// Apply CORS
+app.UseCors("ui");
 
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
 startupLogger.LogInformation(

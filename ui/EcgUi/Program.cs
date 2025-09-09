@@ -8,6 +8,8 @@ var builder = WebApplication.CreateBuilder(args);
 // Blazor Server services
 builder.Services.AddRazorPages();
 builder.Services.AddServerSideBlazor();
+builder.Services.AddHttpClient<EcgUi.Services.AgentClient>();
+
 
 // HttpClient with BaseAddress from NavigationManager
 builder.Services.AddScoped(sp =>
@@ -76,5 +78,6 @@ else
             : Results.NotFound();
     });
 }
+
 
 app.Run();

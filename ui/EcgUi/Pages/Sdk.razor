@@ -1,0 +1,106 @@
+@page "/sdk"
+@inject EcgUi.Services.AgentClient Agent
+@using System.Timers
+
+<h3>1200HR SDK Control</h3>
+
+<div class="sdk-controls">
+  <label>Sample rate</label>
+  <input type="number" min="250" max="1000" step="250" @bind="sampleRate" />
+  <button @onclick="Open">Open</button>
+  <button @onclick="Init">Init</button>
+  <button @onclick="Start">Start</button>
+  <button @onclick="Stop">Stop</button>
+  <span class="status">@status</span>
+</div>
+
+<div class="sdk-plot">
+  <h4>Live preview Lead II and V2</h4>
+  <svg width="100%" height="240" viewBox="0 0 1000 240" preserveAspectRatio="none">
+    <polyline points="@lead2Points" fill="none" stroke="currentColor" stroke-width="1" />
+  </svg>
+  <svg width="100%" height="240" viewBox="0 0 1000 240" preserveAspectRatio="none">
+    <polyline points="@v2Points" fill="none" stroke="currentColor" stroke-width="1" />
+  </svg>
+</div>
+
+@code {
+  string status = "idle";
+  int sampleRate = 1000;
+  System.Timers.Timer? timer;
+  short[][]? last;
+  string lead2Points = "";
+  string v2Points = "";
+  int nSamples = 500; // pull last 500 samples
+
+  protected override void OnInitialized()
+  {
+    timer = new System.Timers.Timer(250);
+    timer.Elapsed += async (_, __) => await Poll();
+    timer.AutoReset = true;
+  }
+
+  async Task Open()
+  {
+    var r = await Agent.OpenAsync();
+    status = await r.Content.ReadAsStringAsync();
+    StateHasChanged();
+  }
+  async Task Init()
+  {
+    var r = await Agent.InitAsync(sampleRate);
+    status = await r.Content.ReadAsStringAsync();
+    StateHasChanged();
+  }
+  async Task Start()
+  {
+    var r = await Agent.StartAsync();
+    status = await r.Content.ReadAsStringAsync();
+    timer?.Start();
+    StateHasChanged();
+  }
+  async Task Stop()
+  {
+    timer?.Stop();
+    var r = await Agent.StopAsync();
+    status = await r.Content.ReadAsStringAsync();
+    StateHasChanged();
+  }
+
+  async Task Poll()
+  {
+    try
+    {
+      last = await Agent.GetSamplesAsync(nSamples);
+      if (last is null || last.Length == 0) return;
+
+      // Lead index convention from SDK example:
+      // 0 I, 1 II, 2 III, 3 aVR, 4 aVL, 5 aVF, 6..11 V1..V6
+      var lead2 = last[1];                 // Lead II
+      var v2 = last[7];                    // V2  (V1 at 6, V2 at 7)
+      lead2Points = ToPolyline(lead2, 1000, 240);
+      v2Points = ToPolyline(v2, 1000, 240);
+      InvokeAsync(StateHasChanged);
+    }
+    catch { /* ignore transient */ }
+  }
+
+  // map int16 samples to svg polyline points
+  static string ToPolyline(short[] data, int width, int height)
+  {
+    if (data.Length == 0) return "";
+    // simple autoscale
+    var min = data.Min(); var max = data.Max();
+    var span = Math.Max(1, max - min);
+    var sb = new System.Text.StringBuilder(data.Length * 6);
+    for (int i = 0; i < data.Length; i++)
+    {
+      var x = (int)((i / (double)(data.Length - 1)) * (width - 1));
+      var y = height - 10 - (int)(((data[i] - min) / (double)span) * (height - 20));
+      sb.Append(x).Append(',').Append(y).Append(' ');
+    }
+    return sb.ToString();
+  }
+
+  public void Dispose() { timer?.Dispose(); }
+}
