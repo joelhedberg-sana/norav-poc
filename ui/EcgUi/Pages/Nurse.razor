@@ -39,6 +39,7 @@
   <button class="btn btn-secondary btn-sm" @onclick="RefreshStatus">Refresh Status</button>
   <button class="btn btn-success btn-sm" disabled="@(!activeActive)" @onclick="Continue">Continue</button>
   <button class="btn btn-warning btn-sm" disabled="@(!activeActive)" @onclick="ClearSession">Clear (Abort)</button>
+  <button class="btn btn-danger btn-sm" @onclick="ResetReports">Reset Storage</button>
 </div>
 
 <h5>Status</h5>
@@ -145,7 +146,19 @@
 
   private async Task Continue()
   {
-    await ClearSession();
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/session/continue", null);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshStatus();
+    await RefreshReports();
+  }
+
+  private async Task ResetReports()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/reports/clear", null);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshReports();
   }
 
   private async Task RefreshReports()

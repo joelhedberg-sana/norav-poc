@@ -16,12 +16,48 @@ builder.Services.AddScoped(sp =>
     return new HttpClient { BaseAddress = new Uri(nav.BaseUri) };
 });
 
-if ((builder.Configuration["Storage:Mode"] ?? "Local") == "Azurite")
+// Determine storage mode with a fast TCP connectivity check (no SDK retries)
+var requestedMode = builder.Configuration["Storage:Mode"] ?? "Local";
+var storageMode = requestedMode;
+if (requestedMode == "Azurite")
 {
-    builder.Services.AddSingleton(sp =>
-        new BlobContainerClient(
-            builder.Configuration["Storage:AzuriteConnectionString"],
-            builder.Configuration["Storage:AzuriteContainer"]));
+    bool reachable = false;
+    string host = "127.0.0.1";
+    int port = 10000;
+    var connStr = builder.Configuration["Storage:AzuriteConnectionString"] ?? string.Empty;
+    // Rough parse: if the connection string has BlobEndpoint=... extract host:port
+    var blobEndpointToken = connStr.Split(';').FirstOrDefault(s => s.StartsWith("BlobEndpoint=", StringComparison.OrdinalIgnoreCase));
+    if (blobEndpointToken != null)
+    {
+        try
+        {
+            var uri = new Uri(blobEndpointToken.Substring("BlobEndpoint=".Length));
+            host = uri.Host;
+            port = uri.Port;
+        }
+        catch { }
+    }
+    try
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        using var client = new System.Net.Sockets.TcpClient();
+        var connectTask = client.ConnectAsync(host, port);
+        var completed = Task.WhenAny(connectTask, Task.Delay(Timeout.Infinite, cts.Token)).Result;
+        reachable = connectTask.IsCompletedSuccessfully && client.Connected;
+    }
+    catch { reachable = false; }
+
+    if (reachable)
+    {
+        var containerName = builder.Configuration["Storage:AzuriteContainer"];
+        builder.Services.AddSingleton(sp => new BlobContainerClient(connStr, containerName));
+        Console.WriteLine($"INFO: Azurite reachable at {host}:{port}. Using Azurite storage mode.");
+    }
+    else
+    {
+        Console.WriteLine($"WARN: Azurite not reachable at {host}:{port}. Falling back to Local storage mode.");
+        storageMode = "Local";
+    }
 }
 
 var app = builder.Build();
@@ -33,7 +69,6 @@ app.UseRouting();
 app.MapBlazorHub();
 app.MapFallbackToPage("/_Host");
 
-var storageMode = builder.Configuration["Storage:Mode"] ?? "Local";
 if (storageMode == "Azurite")
 {
     // Blob listing endpoint with resilience
