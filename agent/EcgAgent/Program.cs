@@ -23,7 +23,11 @@ var aet = builder.Configuration.GetValue<string>("Dicom:AET", "NEKO_ECG");
 var server = DicomServerFactory.Create<EcgDicomService>(dicomPort);
 
 // --- Services (DI) ---
-builder.Services.AddHostedService<WatcherService>();
+var deferredUpload = cfg.GetValue<bool?>("Session:DeferredUpload") ?? false;
+if (!deferredUpload)
+{
+    builder.Services.AddHostedService<WatcherService>();
+}
 builder.Services.AddSingleton<IConfiguration>(cfg);
 
 // Register Blob client only if using Azurite
@@ -94,6 +98,111 @@ app.MapPost("/session/clear", (string? reason, ILoggerFactory lf) =>
     if (changed)
         log.LogInformation("Cleared session {SessionId} reason={Reason}", prev!.SessionId, prev.ClearReason);
     return Results.Ok(new { cleared = changed, previous = prev?.SessionId });
+});
+
+// Finalize (Continue) -> find latest PDF since session start, upload/copy, then clear
+app.MapPost("/session/continue", async (ILoggerFactory lf, IServiceProvider sp) =>
+{
+    var log = lf.CreateLogger("Session");
+    var s = EcgAgent.PatientSessionStore.GetActive();
+    if (s == null) return Results.BadRequest(new { error = "no_active_session" });
+    var pdfDir = cfg["PdfWatchDir"]!;
+    if (!Directory.Exists(pdfDir)) return Results.Problem($"PdfWatchDir not found: {pdfDir}");
+
+    // Pick newest PDF whose LastWrite >= session.CreatedAt
+    var files = Directory.GetFiles(pdfDir, "*.pdf");
+    var candidates = files
+        .Select(f => new FileInfo(f))
+        .Where(fi => fi.LastWriteTimeUtc >= s.CreatedAt.UtcDateTime.AddSeconds(-5))
+        .OrderByDescending(fi => fi.LastWriteTimeUtc)
+        .ToList();
+    if (candidates.Count == 0)
+        return Results.NotFound(new { error = "no_pdf_found_since_session_start" });
+
+    var chosen = candidates.First();
+    // Ensure file stable (size unchanged across two reads)
+    long lastLen = -1;
+    for (int i = 0; i < 5; i++)
+    {
+        chosen.Refresh();
+        if (chosen.Length > 0 && chosen.Length == lastLen) break;
+        lastLen = chosen.Length;
+        await Task.Delay(300);
+    }
+
+    string safePid = new string(s.Demographics.PatientId.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray());
+    var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+    var destName = $"{safePid}_{stamp}_{chosen.Name}";
+
+    try
+    {
+        if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
+        {
+            var blob = sp.GetService<BlobContainerClient>();
+            if (blob == null) return Results.Problem("blob_client_unavailable");
+            await blob.CreateIfNotExistsAsync();
+            var client = blob.GetBlobClient(destName);
+            await using var sfs = File.Open(chosen.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+            await client.UploadAsync(sfs, overwrite: true);
+            log.LogInformation("Finalize uploaded {Src} -> blob {Blob}", chosen.FullName, destName);
+        }
+        else
+        {
+            var destDir = Path.GetFullPath(cfg["Storage:LocalIngestDir"]!);
+            Directory.CreateDirectory(destDir);
+            var destPath = Path.Combine(destDir, destName);
+            File.Copy(chosen.FullName, destPath, overwrite: true);
+            log.LogInformation("Finalize copied {Src} -> {Dest}", chosen.FullName, destPath);
+        }
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex, "Finalize upload failed for {File}", chosen.FullName);
+        return Results.Problem($"upload_failed:{ex.Message}");
+    }
+
+    EcgAgent.PatientSessionStore.AutoClearAfterMeasurement();
+    log.LogInformation("Session finalized and cleared {SessionId}", s.SessionId);
+    return Results.Ok(new { uploaded = destName, cleared = true });
+});
+
+// Clear stored reports (ingest) - destructive
+app.MapPost("/reports/clear", async (ILoggerFactory lf, IServiceProvider sp) =>
+{
+    var log = lf.CreateLogger("Reports");
+    int deleted = 0;
+    try
+    {
+        if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
+        {
+            var blob = sp.GetService<BlobContainerClient>();
+            if (blob == null) return Results.Problem("blob_client_unavailable");
+            await blob.CreateIfNotExistsAsync();
+            await foreach (var bi in blob.GetBlobsAsync())
+            {
+                if (bi.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    await blob.DeleteBlobIfExistsAsync(bi.Name);
+                    deleted++;
+                }
+            }
+        }
+        else
+        {
+            var destDir = Path.GetFullPath(cfg["Storage:LocalIngestDir"]!);
+            if (Directory.Exists(destDir))
+            {
+                foreach (var f in Directory.GetFiles(destDir, "*.pdf")) { File.Delete(f); deleted++; }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex, "Failed clearing reports");
+        return Results.Problem($"clear_failed:{ex.Message}");
+    }
+    log.LogInformation("Cleared {Count} report PDFs", deleted);
+    return Results.Ok(new { deleted });
 });
 
 // Backward compatibility: /demographics delegates to session start (will conflict if active)
