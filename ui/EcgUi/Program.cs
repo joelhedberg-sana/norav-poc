@@ -114,7 +114,8 @@ if (storageMode == "Azurite")
 else
 {
     // Local file system endpoints (existing behavior)
-    var ingestDir = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";
+    var ingestRaw = builder.Configuration["Storage:LocalIngestDir"] ?? "../localdata/ingest";
+    var ingestDir = Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar));
     Directory.CreateDirectory(ingestDir);
     app.MapGet("/api/reports", () =>
     {
@@ -124,10 +125,14 @@ else
     app.MapGet("/api/reports/{name}", (string name) =>
     {
         var path = Path.Combine(ingestDir, name);
-        return File.Exists(path)
-            ? Results.File(path, "application/pdf", enableRangeProcessing: true)
-            : Results.NotFound();
+        if (File.Exists(path))
+            return Results.File(path, "application/pdf", enableRangeProcessing: true);
+        var existing = Directory.Exists(ingestDir)
+            ? Directory.GetFiles(ingestDir, "*.pdf").Select(Path.GetFileName).OrderBy(x => x).ToArray()
+            : Array.Empty<string>();
+        return Results.NotFound(new { error = "file_missing", requested = name, resolvedPath = path, ingestDir, existing });
     });
+    app.MapGet("/api/debug/paths", () => new { ingestRaw, ingestDir, cwd = Directory.GetCurrentDirectory(), exists = Directory.Exists(ingestDir) });
 }
 
 app.Run();

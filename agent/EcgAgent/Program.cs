@@ -134,21 +134,43 @@ app.MapPost("/session/continue", async (ILoggerFactory lf, IServiceProvider sp) 
     var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
     var destName = $"{safePid}_{stamp}_{chosen.Name}";
 
+    var mode = cfg["Storage:Mode"] ?? "Local";
+    bool usedBlob = false;
+    bool fallback = false;
     try
     {
-        if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
+        if (mode == "Azurite")
         {
             var blob = sp.GetService<BlobContainerClient>();
-            if (blob == null) return Results.Problem("blob_client_unavailable");
-            await blob.CreateIfNotExistsAsync();
-            var client = blob.GetBlobClient(destName);
-            await using var sfs = File.Open(chosen.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
-            await client.UploadAsync(sfs, overwrite: true);
-            log.LogInformation("Finalize uploaded {Src} -> blob {Blob}", chosen.FullName, destName);
+            if (blob != null)
+            {
+                // Quick reachability test (TCP) before invoking SDK heavy retries
+                if (TryQuickConnect(blob.Uri.Host, blob.Uri.Port))
+                {
+                    await blob.CreateIfNotExistsAsync();
+                    var client = blob.GetBlobClient(destName);
+                    await using var sfs = File.Open(chosen.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    await client.UploadAsync(sfs, overwrite: true);
+                    log.LogInformation("Finalize uploaded {Src} -> blob {Blob}", chosen.FullName, destName);
+                    usedBlob = true;
+                }
+                else
+                {
+                    log.LogWarning("Azurite unreachable, falling back to Local ingest for {File}", chosen.FullName);
+                    fallback = true;
+                }
+            }
+            else
+            {
+                log.LogWarning("Blob client not registered, falling back to Local ingest");
+                fallback = true;
+            }
         }
-        else
+
+        if (!usedBlob) // Local path ingest
         {
-            var destDir = Path.GetFullPath(cfg["Storage:LocalIngestDir"]!);
+            var ingestRaw = cfg["Storage:LocalIngestDir"]!;
+            var destDir = Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar));
             Directory.CreateDirectory(destDir);
             var destPath = Path.Combine(destDir, destName);
             File.Copy(chosen.FullName, destPath, overwrite: true);
@@ -158,12 +180,28 @@ app.MapPost("/session/continue", async (ILoggerFactory lf, IServiceProvider sp) 
     catch (Exception ex)
     {
         log.LogError(ex, "Finalize upload failed for {File}", chosen.FullName);
-        return Results.Problem($"upload_failed:{ex.Message}");
+        return Results.Problem($"upload_failed:{ex.GetType().Name}:{ex.Message}");
     }
 
     EcgAgent.PatientSessionStore.AutoClearAfterMeasurement();
-    log.LogInformation("Session finalized and cleared {SessionId}", s.SessionId);
-    return Results.Ok(new { uploaded = destName, cleared = true });
+    log.LogInformation("Session finalized and cleared {SessionId} (blob={Blob} fallback={Fallback})", s.SessionId, usedBlob, fallback);
+    return Results.Ok(new { uploaded = destName, cleared = true, storageMode = mode, usedBlob, fallback });
+});
+
+// Debug path resolution
+app.MapGet("/debug/paths", () =>
+{
+    var ingestRaw = cfg["Storage:LocalIngestDir"];
+    var ingestDir = ingestRaw != null ? Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar)) : null;
+    return Results.Ok(new
+    {
+        storageMode = cfg["Storage:Mode"],
+        ingestRaw,
+        ingestDir,
+        pdfWatchDir = cfg["PdfWatchDir"],
+        worklistIni = worklistIniPath,
+        cwd = Directory.GetCurrentDirectory()
+    });
 });
 
 // Clear stored reports (ingest) - destructive
@@ -189,7 +227,8 @@ app.MapPost("/reports/clear", async (ILoggerFactory lf, IServiceProvider sp) =>
         }
         else
         {
-            var destDir = Path.GetFullPath(cfg["Storage:LocalIngestDir"]!);
+            var ingestRaw = cfg["Storage:LocalIngestDir"]!;
+            var destDir = Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar));
             if (Directory.Exists(destDir))
             {
                 foreach (var f in Directory.GetFiles(destDir, "*.pdf")) { File.Delete(f); deleted++; }
@@ -225,6 +264,20 @@ app.MapPost("/mwl/items", (Demographics d) =>
 });
 
 app.Run();
+
+// local helper for quick TCP connectivity
+static bool TryQuickConnect(string host, int port)
+{
+    try
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        using var client = new System.Net.Sockets.TcpClient();
+        var task = client.ConnectAsync(host, port);
+        var completed = Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token)).Result;
+        return task.IsCompletedSuccessfully && client.Connected;
+    }
+    catch { return false; }
+}
 
 // --- Models ---
 public record Demographics(
