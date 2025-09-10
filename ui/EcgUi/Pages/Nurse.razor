@@ -2,6 +2,7 @@
 @using Microsoft.AspNetCore.Components.Forms
 @inject HttpClient Http
 @inject IConfiguration Cfg
+@using System.Net.Http.Json
 
 <h3>ECG Demographics → Worklist (INI)</h3>
 
@@ -24,8 +25,10 @@
   <InputText @bind-Value="m.Email" placeholder="E-Mail" />
   <InputText @bind-Value="m.Medications" placeholder="Medications" />
   <InputText @bind-Value="m.Other" placeholder="Other" />
-  <button type="submit">Write Worklist</button>
+  <button type="submit">Start Session</button>
   <button type="button" @onclick="SendToMwl">Send to MWL</button>
+  <button type="button" @onclick="GetStatus">Status</button>
+  <button type="button" @onclick="ClearSession">Clear Session</button>
 </EditForm>
 
 <p>@status</p>
@@ -56,8 +59,8 @@
   private async Task Submit()
   {
     var agent = Cfg["AgentUrl"]!;
-    var resp = await Http.PostAsJsonAsync($"{agent}/demographics", m);
-    status = resp.IsSuccessStatusCode ? "INI written." : "Failed.";
+    var resp = await Http.PostAsJsonAsync($"{agent}/session/start", m);
+    status = await resp.Content.ReadAsStringAsync();
   }
 
   private async Task SendToMwl()
@@ -65,5 +68,18 @@
     var agent = Cfg["AgentUrl"]!;
     var resp = await Http.PostAsJsonAsync($"{agent}/mwl/items", m);
     status = resp.IsSuccessStatusCode ? "MWL item added." : "MWL add failed.";
+  }
+
+  private async Task GetStatus()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    status = await Http.GetStringAsync($"{agent}/session/status");
+  }
+
+  private async Task ClearSession()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/session/clear", null);
+    status = await resp.Content.ReadAsStringAsync();
   }
 }
