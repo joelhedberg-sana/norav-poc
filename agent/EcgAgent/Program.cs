@@ -49,44 +49,60 @@ var app = builder.Build();
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
 startupLogger.LogInformation("Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini} | DICOM AET={AET} Port={Port}", url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"], aet, dicomPort);
 
-// --- Minimal API: POST /demographics -> write PatientFile.ini ---
-// NOTE: Replace the INI keys with the vendor-confirmed schema once you have a sample.
+// --- Session-based single-patient workflow ---
 var worklistIniPath = cfg["WorklistIniPath"]!;
-app.MapPost("/demographics", async (Demographics d, ILoggerFactory lf) =>
-{
-    var log = lf.CreateLogger("Demographics");
-    log.LogInformation("Received demographics PatientId={PatientId} LastName={LastName} FirstName={FirstName}", d.PatientId, d.LastName, d.FirstName);
-    try
-    {
-        var sb = new StringBuilder()
-            .AppendLine("[PatientData001]")
-            .AppendLine($"ID={d.PatientId}")
-            .AppendLine($"LastName={d.LastName}")
-            .AppendLine($"FirstName={d.FirstName}")
-            .AppendLine($"BirthDay={d.BirthDay}")
-            .AppendLine($"BirthMonth={d.BirthMonth}")
-            .AppendLine($"BirthYear={d.BirthYear}")
-            .AppendLine($"Sex={d.Sex}")
-            .AppendLine($"Weight={d.Weight}")
-            .AppendLine($"Height={d.Height}")
-            .AppendLine($"Address={d.Address}")
-            .AppendLine($"Phone1={d.Phone1}")
-            .AppendLine($"Phone2={d.Phone2}")
-            .AppendLine($"Fax={d.Fax}")
-            .AppendLine($"E-Mail={d.Email}")
-            .AppendLine($"Medications={d.Medications}")
-            .AppendLine($"Other={d.Other}");
+var defaultTtlMinutes = cfg.GetValue<int?>("Session:TtlMinutes") ?? 15;
+var autoClearOnFirstPdf = cfg.GetValue<bool?>("Session:AutoClearOnFirstPdf") ?? true;
+var patientSectionName = cfg["Worklist:SectionName"] ?? "PatientData007"; // vendor expects this index
 
-        Directory.CreateDirectory(Path.GetDirectoryName(worklistIniPath)!);
-        await File.WriteAllTextAsync(worklistIniPath, sb.ToString(), Encoding.UTF8);
-        log.LogInformation("Wrote INI file {Path} (length {Len} bytes)", worklistIniPath, sb.Length);
-        return Results.Ok(new { wrote = worklistIniPath });
-    }
-    catch (Exception ex)
+app.MapPost("/session/start", (Demographics d, int? ttlMinutes, bool? force, ILoggerFactory lf) =>
+{
+    var log = lf.CreateLogger("Session");
+    var ttl = TimeSpan.FromMinutes(ttlMinutes ?? defaultTtlMinutes);
+    var (ok, session, error) = EcgAgent.PatientSessionStore.Start(d, worklistIniPath, ttl, force == true, patientSectionName);
+    if (ok)
     {
-        log.LogError(ex, "Failed writing INI at {Path}", worklistIniPath);
-        return Results.Problem($"Failed writing INI: {ex.Message}");
+        log.LogInformation("Started session {SessionId} PatientId={Pid} Expires={Exp}", session!.SessionId, d.PatientId, session.ExpiresAt);
+        return Results.Ok(new { sessionId = session.SessionId, expiresAt = session.ExpiresAt });
     }
+    log.LogWarning("Session start rejected error={Error}", error);
+    return Results.Conflict(new { error, active = session?.SessionId });
+});
+
+app.MapGet("/session/status", () =>
+{
+    var s = EcgAgent.PatientSessionStore.GetActive();
+    return s == null
+        ? Results.Ok(new { active = false })
+        : Results.Ok(new
+        {
+            active = true,
+            sessionId = s.SessionId,
+            patientId = s.Demographics.PatientId,
+            lastName = s.Demographics.LastName,
+            firstName = s.Demographics.FirstName,
+            expiresAt = s.ExpiresAt,
+            cleared = s.Cleared,
+            clearReason = s.ClearReason
+        });
+});
+
+app.MapPost("/session/clear", (string? reason, ILoggerFactory lf) =>
+{
+    var log = lf.CreateLogger("Session");
+    var (prev, changed) = EcgAgent.PatientSessionStore.Clear(reason ?? "manual");
+    if (changed)
+        log.LogInformation("Cleared session {SessionId} reason={Reason}", prev!.SessionId, prev.ClearReason);
+    return Results.Ok(new { cleared = changed, previous = prev?.SessionId });
+});
+
+// Backward compatibility: /demographics delegates to session start (will conflict if active)
+app.MapPost("/demographics", (Demographics d) =>
+{
+    var (ok, session, error) = EcgAgent.PatientSessionStore.Start(d, worklistIniPath, TimeSpan.FromMinutes(defaultTtlMinutes), force: false, patientSectionName);
+    return ok
+        ? Results.Ok(new { wrote = worklistIniPath, sessionId = session!.SessionId })
+        : Results.Conflict(new { error, active = session?.SessionId });
 });
 
 // --- MWL: add worklist item ---
@@ -102,7 +118,7 @@ app.MapPost("/mwl/items", (Demographics d) =>
 app.Run();
 
 // --- Models ---
-record Demographics(
+public record Demographics(
     string PatientId,
     string LastName,
     string FirstName,
@@ -130,11 +146,13 @@ public class WatcherService : BackgroundService
     private readonly ILogger<WatcherService> _log;
     private readonly ConcurrentDictionary<string, byte> _processed = new(StringComparer.OrdinalIgnoreCase);
     private Timer? _pollTimer;
+    private readonly bool _autoClear;
 
     public WatcherService(IConfiguration cfg, IServiceProvider sp, ILogger<WatcherService> log)
     {
         _cfg = cfg;
         _log = log;
+        _autoClear = cfg.GetValue<bool?>("Session:AutoClearOnFirstPdf") ?? true;
         if ((_cfg["Storage:Mode"] ?? "Local") == "Azurite")
             _blob = sp.GetService<BlobContainerClient>();
     }
@@ -239,6 +257,12 @@ public class WatcherService : BackgroundService
                 var dest = Path.Combine(destDir, Path.GetFileName(path));
                 File.Copy(path, dest, overwrite: true);
                 _log.LogInformation("Copied {Src} -> {Dest}", path, dest);
+            }
+
+            if (_autoClear)
+            {
+                EcgAgent.PatientSessionStore.AutoClearAfterMeasurement();
+                _log.LogInformation("Auto-cleared active patient session after PDF {File}", path);
             }
         }
         catch (Exception ex)
