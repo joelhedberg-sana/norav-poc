@@ -36,26 +36,44 @@ app.MapFallbackToPage("/_Host");
 var storageMode = builder.Configuration["Storage:Mode"] ?? "Local";
 if (storageMode == "Azurite")
 {
-    // Blob listing endpoint
-    app.MapGet("/api/reports", async (BlobContainerClient container) =>
+    // Blob listing endpoint with resilience
+    app.MapGet("/api/reports", async (BlobContainerClient container, ILoggerFactory lf) =>
     {
-        await container.CreateIfNotExistsAsync();
-        var names = new List<string>();
-        await foreach (BlobItem b in container.GetBlobsAsync(prefix: null))
+        var log = lf.CreateLogger("Reports");
+        try
         {
-            if (b.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
-                names.Add(b.Name);
+            await container.CreateIfNotExistsAsync();
+            var names = new List<string>();
+            await foreach (BlobItem b in container.GetBlobsAsync(prefix: null))
+            {
+                if (b.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                    names.Add(b.Name);
+            }
+            return Results.Ok(names.OrderByDescending(n => n));
         }
-        return names.OrderByDescending(n => n);
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Failed listing blob reports (returning empty)");
+            return Results.Ok(Array.Empty<string>());
+        }
     });
 
-    // Blob download endpoint
-    app.MapGet("/api/reports/{name}", async (string name, BlobContainerClient container) =>
+    // Blob download endpoint with resilience
+    app.MapGet("/api/reports/{name}", async (string name, BlobContainerClient container, ILoggerFactory lf) =>
     {
-        var client = container.GetBlobClient(name);
-        if (!await client.ExistsAsync()) return Results.NotFound();
-        var dl = await client.DownloadStreamingAsync();
-        return Results.Stream(dl.Value.Content, contentType: "application/pdf", fileDownloadName: name, enableRangeProcessing: true);
+        var log = lf.CreateLogger("Reports");
+        try
+        {
+            var client = container.GetBlobClient(name);
+            if (!await client.ExistsAsync()) return Results.NotFound();
+            var dl = await client.DownloadStreamingAsync();
+            return Results.Stream(dl.Value.Content, contentType: "application/pdf", fileDownloadName: name, enableRangeProcessing: true);
+        }
+        catch (Exception ex)
+        {
+            log.LogError(ex, "Failed downloading report {Name}", name);
+            return Results.NotFound();
+        }
     });
 }
 else

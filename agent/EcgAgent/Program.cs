@@ -226,6 +226,8 @@ public class WatcherService : BackgroundService
         _log.LogInformation("Processing PDF {File}", path);
         try
         {
+            // Capture active session (if any) at processing start so we can tag the file
+            var session = EcgAgent.PatientSessionStore.GetActive();
             // Retry open until stable
             const int maxAttempts = 5;
             var lastLen = -1L;
@@ -242,10 +244,20 @@ public class WatcherService : BackgroundService
                 await Task.Delay(400, ct);
             }
 
+            // Build destination (optionally patient-prefixed) name
+            string originalName = Path.GetFileName(path);
+            string destName = originalName;
+            if (session != null)
+            {
+                var safePid = new string(session.Demographics.PatientId.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray());
+                var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                destName = $"{safePid}_{stamp}_{originalName}";
+            }
+
             if ((_cfg["Storage:Mode"] ?? "Local") == "Azurite")
             {
                 await _blob!.CreateIfNotExistsAsync(cancellationToken: ct);
-                var client = _blob.GetBlobClient(Path.GetFileName(path));
+                var client = _blob.GetBlobClient(destName);
                 await using var s = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
                 await client.UploadAsync(s, overwrite: true, cancellationToken: ct);
                 _log.LogInformation("Uploaded {Name} ({Bytes} bytes) to container {Container}", client.Name, new FileInfo(path).Length, _blob.Name);
@@ -254,7 +266,7 @@ public class WatcherService : BackgroundService
             {
                 var destDir = Path.GetFullPath(_cfg["Storage:LocalIngestDir"]!);
                 Directory.CreateDirectory(destDir);
-                var dest = Path.Combine(destDir, Path.GetFileName(path));
+                var dest = Path.Combine(destDir, destName);
                 File.Copy(path, dest, overwrite: true);
                 _log.LogInformation("Copied {Src} -> {Dest}", path, dest);
             }
