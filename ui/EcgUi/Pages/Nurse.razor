@@ -2,37 +2,75 @@
 @using Microsoft.AspNetCore.Components.Forms
 @inject HttpClient Http
 @inject IConfiguration Cfg
+@using System.Net.Http.Json
 
-<h3>ECG Demographics → Worklist (INI)</h3>
+<h3>Assign to ECG</h3>
+<p>Select a patient below and click Assign to ECG. After acquisition, click Continue to clear.</p>
 
-<EditForm Model="@m" OnValidSubmit="Submit" FormName="demoForm">
-  <DataAnnotationsValidator />
-  <ValidationSummary />
-  <InputText @bind-Value="m.PatientId" placeholder="ID" />
-  <InputText @bind-Value="m.LastName" placeholder="Last Name" />
-  <InputText @bind-Value="m.FirstName" placeholder="First Name" />
-  <InputNumber @bind-Value="m.BirthDay" placeholder="Birth Day" />
-  <InputNumber @bind-Value="m.BirthMonth" placeholder="Birth Month" />
-  <InputNumber @bind-Value="m.BirthYear" placeholder="Birth Year" />
-  <InputNumber @bind-Value="m.Sex" placeholder="Sex (1=Male,2=Female)" />
-  <InputNumber @bind-Value="m.Weight" placeholder="Weight" />
-  <InputNumber @bind-Value="m.Height" placeholder="Height" />
-  <InputText @bind-Value="m.Address" placeholder="Address" />
-  <InputText @bind-Value="m.Phone1" placeholder="Phone1" />
-  <InputText @bind-Value="m.Phone2" placeholder="Phone2" />
-  <InputText @bind-Value="m.Fax" placeholder="Fax" />
-  <InputText @bind-Value="m.Email" placeholder="E-Mail" />
-  <InputText @bind-Value="m.Medications" placeholder="Medications" />
-  <InputText @bind-Value="m.Other" placeholder="Other" />
-  <button type="submit">Write Worklist</button>
-  <button type="button" @onclick="SendToMwl">Send to MWL</button>
-</EditForm>
+<table class="table table-sm">
+  <thead>
+    <tr>
+      <th>ID</th><th>Name</th><th>DOB</th><th></th>
+    </tr>
+  </thead>
+  <tbody>
+    @foreach (var p in patients)
+    {
+      <tr class="@(activePatientId == p.PatientId ? "table-success" : "")">
+        <td>@p.PatientId</td>
+        <td>@p.LastName, @p.FirstName</td>
+        <td>@p.BirthYear-@p.BirthMonth-@p.BirthDay</td>
+        <td>
+          @if (activePatientId == p.PatientId && activeActive)
+          {
+            <span>Active</span>
+          }
+          else
+          {
+            <button class="btn btn-primary btn-sm" @onclick="() => Assign(p)">Assign to ECG</button>
+          }
+        </td>
+      </tr>
+    }
+  </tbody>
+</table>
+
+<div class="mb-2">
+  <button class="btn btn-secondary btn-sm" @onclick="RefreshStatus">Refresh Status</button>
+  <button class="btn btn-success btn-sm" disabled="@(!activeActive)" @onclick="Continue">Continue</button>
+  <button class="btn btn-warning btn-sm" disabled="@(!activeActive)" @onclick="ClearSession">Clear (Abort)</button>
+  <button class="btn btn-danger btn-sm" @onclick="ResetReports">Reset Storage</button>
+</div>
+
+<h5>Status</h5>
+<pre style="background:#f7f7f7;padding:6px;">@status</pre>
+
+@if (activeActive && filteredReports.Any())
+{
+  <h5>Recent Reports for @activePatientId</h5>
+  <ul>
+    @foreach (var r in filteredReports.Take(5))
+    {
+      <li><a target="_blank" href="/api/reports/@r">@r</a></li>
+    }
+  </ul>
+  <a href="/reports" target="_blank">All Reports</a>
+}
 
 <p>@status</p>
 
 @code {
-  Demographics m = new() { BirthDay = 1, BirthMonth = 1, BirthYear = 1970 }; // defaults
-  string status = "";
+  string status = "(idle)";
+  string? activePatientId;
+  bool activeActive;
+  List<string> allReports = new();
+  List<string> filteredReports = new();
+  List<Demographics> patients = new()
+  {
+    new Demographics{ PatientId="5098345", LastName="Hedberg", FirstName="Joel", BirthDay=1, BirthMonth=1, BirthYear=1970, Sex=1, Email="test" },
+    new Demographics{ PatientId="8882222", LastName="Doe", FirstName="Jane", BirthDay=2, BirthMonth=2, BirthYear=1985, Sex=2, Email="jane@example.org" },
+    new Demographics{ PatientId="7771111", LastName="Smith", FirstName="John", BirthDay=3, BirthMonth=3, BirthYear=1990, Sex=1, Email="john@example.org" }
+  };
   public class Demographics
   {
     public string PatientId { get; set; } = "";
@@ -53,17 +91,98 @@
     public string Other { get; set; } = "";
   }
 
-  private async Task Submit()
+  private async Task Assign(Demographics p)
   {
     var agent = Cfg["AgentUrl"]!;
-    var resp = await Http.PostAsJsonAsync($"{agent}/demographics", m);
-    status = resp.IsSuccessStatusCode ? "INI written." : "Failed.";
+    var resp = await Http.PostAsJsonAsync($"{agent}/session/start", p);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshStatus();
+    await RefreshReports();
   }
 
   private async Task SendToMwl()
   {
     var agent = Cfg["AgentUrl"]!;
-    var resp = await Http.PostAsJsonAsync($"{agent}/mwl/items", m);
+    if (activePatientId == null) return;
+    var p = patients.First(x => x.PatientId == activePatientId);
+    var resp = await Http.PostAsJsonAsync($"{agent}/mwl/items", p);
     status = resp.IsSuccessStatusCode ? "MWL item added." : "MWL add failed.";
   }
+
+  private async Task RefreshStatus()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    try
+    {
+      var json = await Http.GetFromJsonAsync<SessionStatus>($"{agent}/session/status");
+      if (json != null && json.active)
+      {
+        activePatientId = json.patientId;
+        activeActive = true;
+      }
+      else
+      {
+        activePatientId = null;
+        activeActive = false;
+      }
+      status = System.Text.Json.JsonSerializer.Serialize(json, new System.Text.Json.JsonSerializerOptions{WriteIndented=true});
+    }
+    catch (Exception ex)
+    {
+      status = $"Status error: {ex.Message}";
+      activePatientId = null;
+      activeActive = false;
+    }
+    await RefreshReports();
+  }
+
+  private async Task ClearSession()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/session/clear", null);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshStatus();
+  }
+
+  private async Task Continue()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/session/continue", null);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshStatus();
+    await RefreshReports();
+  }
+
+  private async Task ResetReports()
+  {
+    var agent = Cfg["AgentUrl"]!;
+    var resp = await Http.PostAsync($"{agent}/reports/clear", null);
+    status = await resp.Content.ReadAsStringAsync();
+    await RefreshReports();
+  }
+
+  private async Task RefreshReports()
+  {
+    try
+    {
+      var list = await Http.GetFromJsonAsync<List<string>>("/api/reports");
+      allReports = list ?? new();
+    }
+    catch (Exception ex)
+    {
+      status = $"Reports error: {ex.Message}";
+      allReports = new();
+    }
+    if (activePatientId != null)
+      filteredReports = allReports.Where(r => r.StartsWith(activePatientId + "_", StringComparison.OrdinalIgnoreCase)).OrderByDescending(r => r).ToList();
+    else filteredReports.Clear();
+    StateHasChanged();
+  }
+
+  protected override async Task OnInitializedAsync()
+  {
+    await RefreshStatus();
+  }
+
+  class SessionStatus { public bool active { get; set; } public string? patientId { get; set; } }
 }

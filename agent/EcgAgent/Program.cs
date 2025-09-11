@@ -23,7 +23,11 @@ var aet = builder.Configuration.GetValue<string>("Dicom:AET", "NEKO_ECG");
 var server = DicomServerFactory.Create<EcgDicomService>(dicomPort);
 
 // --- Services (DI) ---
-builder.Services.AddHostedService<WatcherService>();
+var deferredUpload = cfg.GetValue<bool?>("Session:DeferredUpload") ?? false;
+if (!deferredUpload)
+{
+    builder.Services.AddHostedService<WatcherService>();
+}
 builder.Services.AddSingleton<IConfiguration>(cfg);
 
 // Register Blob client only if using Azurite
@@ -49,44 +53,204 @@ var app = builder.Build();
 var startupLogger = app.Services.GetRequiredService<ILoggerFactory>().CreateLogger("Startup");
 startupLogger.LogInformation("Agent starting on {Url} | Mode={Mode} | PdfWatchDir={PdfDir} | WorklistIni={Ini} | DICOM AET={AET} Port={Port}", url, cfg["Storage:Mode"], cfg["PdfWatchDir"], cfg["WorklistIniPath"], aet, dicomPort);
 
-// --- Minimal API: POST /demographics -> write PatientFile.ini ---
-// NOTE: Replace the INI keys with the vendor-confirmed schema once you have a sample.
+// --- Session-based single-patient workflow ---
 var worklistIniPath = cfg["WorklistIniPath"]!;
-app.MapPost("/demographics", async (Demographics d, ILoggerFactory lf) =>
+var defaultTtlMinutes = cfg.GetValue<int?>("Session:TtlMinutes") ?? 15;
+var autoClearOnFirstPdf = cfg.GetValue<bool?>("Session:AutoClearOnFirstPdf") ?? true;
+var patientSectionName = cfg["Worklist:SectionName"] ?? "PatientData007"; // vendor expects this index
+
+app.MapPost("/session/start", (Demographics d, int? ttlMinutes, bool? force, ILoggerFactory lf) =>
 {
-    var log = lf.CreateLogger("Demographics");
-    log.LogInformation("Received demographics PatientId={PatientId} LastName={LastName} FirstName={FirstName}", d.PatientId, d.LastName, d.FirstName);
+    var log = lf.CreateLogger("Session");
+    var ttl = TimeSpan.FromMinutes(ttlMinutes ?? defaultTtlMinutes);
+    var (ok, session, error) = EcgAgent.PatientSessionStore.Start(d, worklistIniPath, ttl, force == true, patientSectionName);
+    if (ok)
+    {
+        log.LogInformation("Started session {SessionId} PatientId={Pid} Expires={Exp}", session!.SessionId, d.PatientId, session.ExpiresAt);
+        return Results.Ok(new { sessionId = session.SessionId, expiresAt = session.ExpiresAt });
+    }
+    log.LogWarning("Session start rejected error={Error}", error);
+    return Results.Conflict(new { error, active = session?.SessionId });
+});
+
+app.MapGet("/session/status", () =>
+{
+    var s = EcgAgent.PatientSessionStore.GetActive();
+    return s == null
+        ? Results.Ok(new { active = false })
+        : Results.Ok(new
+        {
+            active = true,
+            sessionId = s.SessionId,
+            patientId = s.Demographics.PatientId,
+            lastName = s.Demographics.LastName,
+            firstName = s.Demographics.FirstName,
+            expiresAt = s.ExpiresAt,
+            cleared = s.Cleared,
+            clearReason = s.ClearReason
+        });
+});
+
+app.MapPost("/session/clear", (string? reason, ILoggerFactory lf) =>
+{
+    var log = lf.CreateLogger("Session");
+    var (prev, changed) = EcgAgent.PatientSessionStore.Clear(reason ?? "manual");
+    if (changed)
+        log.LogInformation("Cleared session {SessionId} reason={Reason}", prev!.SessionId, prev.ClearReason);
+    return Results.Ok(new { cleared = changed, previous = prev?.SessionId });
+});
+
+// Finalize (Continue) -> find latest PDF since session start, upload/copy, then clear
+app.MapPost("/session/continue", async (ILoggerFactory lf, IServiceProvider sp) =>
+{
+    var log = lf.CreateLogger("Session");
+    var s = EcgAgent.PatientSessionStore.GetActive();
+    if (s == null) return Results.BadRequest(new { error = "no_active_session" });
+    var pdfDir = cfg["PdfWatchDir"]!;
+    if (!Directory.Exists(pdfDir)) return Results.Problem($"PdfWatchDir not found: {pdfDir}");
+
+    // Pick newest PDF whose LastWrite >= session.CreatedAt
+    var files = Directory.GetFiles(pdfDir, "*.pdf");
+    var candidates = files
+        .Select(f => new FileInfo(f))
+        .Where(fi => fi.LastWriteTimeUtc >= s.CreatedAt.UtcDateTime.AddSeconds(-5))
+        .OrderByDescending(fi => fi.LastWriteTimeUtc)
+        .ToList();
+    if (candidates.Count == 0)
+        return Results.NotFound(new { error = "no_pdf_found_since_session_start" });
+
+    var chosen = candidates.First();
+    // Ensure file stable (size unchanged across two reads)
+    long lastLen = -1;
+    for (int i = 0; i < 5; i++)
+    {
+        chosen.Refresh();
+        if (chosen.Length > 0 && chosen.Length == lastLen) break;
+        lastLen = chosen.Length;
+        await Task.Delay(300);
+    }
+
+    string safePid = new string(s.Demographics.PatientId.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray());
+    var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+    var destName = $"{safePid}_{stamp}_{chosen.Name}";
+
+    var mode = cfg["Storage:Mode"] ?? "Local";
+    bool usedBlob = false;
+    bool fallback = false;
     try
     {
-        var sb = new StringBuilder()
-            .AppendLine("[PatientData001]")
-            .AppendLine($"ID={d.PatientId}")
-            .AppendLine($"LastName={d.LastName}")
-            .AppendLine($"FirstName={d.FirstName}")
-            .AppendLine($"BirthDay={d.BirthDay}")
-            .AppendLine($"BirthMonth={d.BirthMonth}")
-            .AppendLine($"BirthYear={d.BirthYear}")
-            .AppendLine($"Sex={d.Sex}")
-            .AppendLine($"Weight={d.Weight}")
-            .AppendLine($"Height={d.Height}")
-            .AppendLine($"Address={d.Address}")
-            .AppendLine($"Phone1={d.Phone1}")
-            .AppendLine($"Phone2={d.Phone2}")
-            .AppendLine($"Fax={d.Fax}")
-            .AppendLine($"E-Mail={d.Email}")
-            .AppendLine($"Medications={d.Medications}")
-            .AppendLine($"Other={d.Other}");
+        if (mode == "Azurite")
+        {
+            var blob = sp.GetService<BlobContainerClient>();
+            if (blob != null)
+            {
+                // Quick reachability test (TCP) before invoking SDK heavy retries
+                if (TryQuickConnect(blob.Uri.Host, blob.Uri.Port))
+                {
+                    await blob.CreateIfNotExistsAsync();
+                    var client = blob.GetBlobClient(destName);
+                    await using var sfs = File.Open(chosen.FullName, FileMode.Open, FileAccess.Read, FileShare.Read);
+                    await client.UploadAsync(sfs, overwrite: true);
+                    log.LogInformation("Finalize uploaded {Src} -> blob {Blob}", chosen.FullName, destName);
+                    usedBlob = true;
+                }
+                else
+                {
+                    log.LogWarning("Azurite unreachable, falling back to Local ingest for {File}", chosen.FullName);
+                    fallback = true;
+                }
+            }
+            else
+            {
+                log.LogWarning("Blob client not registered, falling back to Local ingest");
+                fallback = true;
+            }
+        }
 
-        Directory.CreateDirectory(Path.GetDirectoryName(worklistIniPath)!);
-        await File.WriteAllTextAsync(worklistIniPath, sb.ToString(), Encoding.UTF8);
-        log.LogInformation("Wrote INI file {Path} (length {Len} bytes)", worklistIniPath, sb.Length);
-        return Results.Ok(new { wrote = worklistIniPath });
+        if (!usedBlob) // Local path ingest
+        {
+            var ingestRaw = cfg["Storage:LocalIngestDir"]!;
+            var destDir = Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar));
+            Directory.CreateDirectory(destDir);
+            var destPath = Path.Combine(destDir, destName);
+            File.Copy(chosen.FullName, destPath, overwrite: true);
+            log.LogInformation("Finalize copied {Src} -> {Dest}", chosen.FullName, destPath);
+        }
     }
     catch (Exception ex)
     {
-        log.LogError(ex, "Failed writing INI at {Path}", worklistIniPath);
-        return Results.Problem($"Failed writing INI: {ex.Message}");
+        log.LogError(ex, "Finalize upload failed for {File}", chosen.FullName);
+        return Results.Problem($"upload_failed:{ex.GetType().Name}:{ex.Message}");
     }
+
+    EcgAgent.PatientSessionStore.AutoClearAfterMeasurement();
+    log.LogInformation("Session finalized and cleared {SessionId} (blob={Blob} fallback={Fallback})", s.SessionId, usedBlob, fallback);
+    return Results.Ok(new { uploaded = destName, cleared = true, storageMode = mode, usedBlob, fallback });
+});
+
+// Debug path resolution
+app.MapGet("/debug/paths", () =>
+{
+    var ingestRaw = cfg["Storage:LocalIngestDir"];
+    var ingestDir = ingestRaw != null ? Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar)) : null;
+    return Results.Ok(new
+    {
+        storageMode = cfg["Storage:Mode"],
+        ingestRaw,
+        ingestDir,
+        pdfWatchDir = cfg["PdfWatchDir"],
+        worklistIni = worklistIniPath,
+        cwd = Directory.GetCurrentDirectory()
+    });
+});
+
+// Clear stored reports (ingest) - destructive
+app.MapPost("/reports/clear", async (ILoggerFactory lf, IServiceProvider sp) =>
+{
+    var log = lf.CreateLogger("Reports");
+    int deleted = 0;
+    try
+    {
+        if ((cfg["Storage:Mode"] ?? "Local") == "Azurite")
+        {
+            var blob = sp.GetService<BlobContainerClient>();
+            if (blob == null) return Results.Problem("blob_client_unavailable");
+            await blob.CreateIfNotExistsAsync();
+            await foreach (var bi in blob.GetBlobsAsync())
+            {
+                if (bi.Name.EndsWith(".pdf", StringComparison.OrdinalIgnoreCase))
+                {
+                    await blob.DeleteBlobIfExistsAsync(bi.Name);
+                    deleted++;
+                }
+            }
+        }
+        else
+        {
+            var ingestRaw = cfg["Storage:LocalIngestDir"]!;
+            var destDir = Path.GetFullPath(ingestRaw.Replace('\\', Path.DirectorySeparatorChar));
+            if (Directory.Exists(destDir))
+            {
+                foreach (var f in Directory.GetFiles(destDir, "*.pdf")) { File.Delete(f); deleted++; }
+            }
+        }
+    }
+    catch (Exception ex)
+    {
+        log.LogError(ex, "Failed clearing reports");
+        return Results.Problem($"clear_failed:{ex.Message}");
+    }
+    log.LogInformation("Cleared {Count} report PDFs", deleted);
+    return Results.Ok(new { deleted });
+});
+
+// Backward compatibility: /demographics delegates to session start (will conflict if active)
+app.MapPost("/demographics", (Demographics d) =>
+{
+    var (ok, session, error) = EcgAgent.PatientSessionStore.Start(d, worklistIniPath, TimeSpan.FromMinutes(defaultTtlMinutes), force: false, patientSectionName);
+    return ok
+        ? Results.Ok(new { wrote = worklistIniPath, sessionId = session!.SessionId })
+        : Results.Conflict(new { error, active = session?.SessionId });
 });
 
 // --- MWL: add worklist item ---
@@ -101,8 +265,22 @@ app.MapPost("/mwl/items", (Demographics d) =>
 
 app.Run();
 
+// local helper for quick TCP connectivity
+static bool TryQuickConnect(string host, int port)
+{
+    try
+    {
+        using var cts = new CancellationTokenSource(TimeSpan.FromMilliseconds(250));
+        using var client = new System.Net.Sockets.TcpClient();
+        var task = client.ConnectAsync(host, port);
+        var completed = Task.WhenAny(task, Task.Delay(Timeout.Infinite, cts.Token)).Result;
+        return task.IsCompletedSuccessfully && client.Connected;
+    }
+    catch { return false; }
+}
+
 // --- Models ---
-record Demographics(
+public record Demographics(
     string PatientId,
     string LastName,
     string FirstName,
@@ -130,11 +308,13 @@ public class WatcherService : BackgroundService
     private readonly ILogger<WatcherService> _log;
     private readonly ConcurrentDictionary<string, byte> _processed = new(StringComparer.OrdinalIgnoreCase);
     private Timer? _pollTimer;
+    private readonly bool _autoClear;
 
     public WatcherService(IConfiguration cfg, IServiceProvider sp, ILogger<WatcherService> log)
     {
         _cfg = cfg;
         _log = log;
+        _autoClear = cfg.GetValue<bool?>("Session:AutoClearOnFirstPdf") ?? true;
         if ((_cfg["Storage:Mode"] ?? "Local") == "Azurite")
             _blob = sp.GetService<BlobContainerClient>();
     }
@@ -208,6 +388,8 @@ public class WatcherService : BackgroundService
         _log.LogInformation("Processing PDF {File}", path);
         try
         {
+            // Capture active session (if any) at processing start so we can tag the file
+            var session = EcgAgent.PatientSessionStore.GetActive();
             // Retry open until stable
             const int maxAttempts = 5;
             var lastLen = -1L;
@@ -224,10 +406,20 @@ public class WatcherService : BackgroundService
                 await Task.Delay(400, ct);
             }
 
+            // Build destination (optionally patient-prefixed) name
+            string originalName = Path.GetFileName(path);
+            string destName = originalName;
+            if (session != null)
+            {
+                var safePid = new string(session.Demographics.PatientId.Where(c => !Path.GetInvalidFileNameChars().Contains(c)).ToArray());
+                var stamp = DateTime.UtcNow.ToString("yyyyMMddHHmmss");
+                destName = $"{safePid}_{stamp}_{originalName}";
+            }
+
             if ((_cfg["Storage:Mode"] ?? "Local") == "Azurite")
             {
                 await _blob!.CreateIfNotExistsAsync(cancellationToken: ct);
-                var client = _blob.GetBlobClient(Path.GetFileName(path));
+                var client = _blob.GetBlobClient(destName);
                 await using var s = File.Open(path, FileMode.Open, FileAccess.Read, FileShare.Read);
                 await client.UploadAsync(s, overwrite: true, cancellationToken: ct);
                 _log.LogInformation("Uploaded {Name} ({Bytes} bytes) to container {Container}", client.Name, new FileInfo(path).Length, _blob.Name);
@@ -236,9 +428,15 @@ public class WatcherService : BackgroundService
             {
                 var destDir = Path.GetFullPath(_cfg["Storage:LocalIngestDir"]!);
                 Directory.CreateDirectory(destDir);
-                var dest = Path.Combine(destDir, Path.GetFileName(path));
+                var dest = Path.Combine(destDir, destName);
                 File.Copy(path, dest, overwrite: true);
                 _log.LogInformation("Copied {Src} -> {Dest}", path, dest);
+            }
+
+            if (_autoClear)
+            {
+                EcgAgent.PatientSessionStore.AutoClearAfterMeasurement();
+                _log.LogInformation("Auto-cleared active patient session after PDF {File}", path);
             }
         }
         catch (Exception ex)
