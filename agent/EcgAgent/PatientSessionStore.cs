@@ -56,10 +56,16 @@ public static class PatientSessionStore
         lock (_lock)
         {
             if (_current == null) return (null, false);
-            if (_current.Cleared) return (_current, false);
-            var prev = _current = _current with { Cleared = true, ClearedAt = DateTimeOffset.UtcNow, ClearReason = reason };
-            TryDeleteIni(prev);
-            return (prev, true);
+            if (_current.Cleared)
+            {
+                var prevRef = _current; // already cleared, ensure it's dropped
+                _current = null;
+                return (prevRef, false);
+            }
+            var cleared = _current with { Cleared = true, ClearedAt = DateTimeOffset.UtcNow, ClearReason = reason };
+            _current = null; // drop active lock immediately so next patient can start
+            TryDeleteIni(cleared);
+            return (cleared, true);
         }
     }
 
@@ -67,9 +73,11 @@ public static class PatientSessionStore
     {
         lock (_lock)
         {
-            if (_current == null || _current.Cleared) return;
-            var prev = _current = _current with { Cleared = true, ClearedAt = DateTimeOffset.UtcNow, ClearReason = "pdf-processed" };
-            TryDeleteIni(prev);
+            if (_current == null) return;
+            if (_current.Cleared) { _current = null; return; }
+            var cleared = _current with { Cleared = true, ClearedAt = DateTimeOffset.UtcNow, ClearReason = "pdf-processed" };
+            _current = null;
+            TryDeleteIni(cleared);
         }
     }
 
